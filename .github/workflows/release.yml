@@ -1,0 +1,72 @@
+# При создании/обновлении тега вида v0.3 собирает NetWarden.exe на настоящей Windows
+# (тем же компилятором csc.exe, что и BUILD_NetWarden.bat) и публикует релиз с обычным
+# и портативным архивами. Можно запустить и вручную (Actions -> Build & Release -> Run workflow).
+name: Build & Release
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Compile NetWarden.cs (встроенный в Windows csc.exe)
+        shell: cmd
+        run: |
+          set "CSC=%WINDIR%\Microsoft.NET\Framework64\v4.0.30319\csc.exe"
+          if not exist "%CSC%" set "CSC=%WINDIR%\Microsoft.NET\Framework\v4.0.30319\csc.exe"
+          "%CSC%" /nologo /target:winexe /optimize+ /codepage:65001 /out:NetWarden.exe /r:System.Windows.Forms.dll /r:System.Drawing.dll /r:System.Web.Extensions.dll NetWarden.cs
+
+      - name: Определить номер версии из тега
+        id: ver
+        shell: pwsh
+        run: |
+          $v = "${{ github.ref_name }}" -replace '^v',''
+          if ([string]::IsNullOrWhiteSpace($v)) { $v = "dev" }
+          echo "ver=$v" >> $env:GITHUB_OUTPUT
+
+      - name: Собрать обычный архив (данные в %APPDATA%)
+        shell: pwsh
+        run: |
+          $ver = "${{ steps.ver.outputs.ver }}"
+          $d = "pkg\NetWarden-$ver"
+          New-Item -ItemType Directory -Force -Path $d | Out-Null
+          Copy-Item NetWarden.exe "$d\"
+          if (Test-Path README.md) { Copy-Item README.md "$d\" }
+          if (Test-Path LICENSE) { Copy-Item LICENSE "$d\" }
+          Compress-Archive -Path "$d\*" -DestinationPath "NetWarden-$ver.zip" -Force
+
+      - name: Собрать портативный архив (данные рядом с exe)
+        shell: pwsh
+        run: |
+          $ver = "${{ steps.ver.outputs.ver }}"
+          $d = "pkg\NetWarden-$ver-Portable"
+          New-Item -ItemType Directory -Force -Path "$d\Data" | Out-Null
+          Copy-Item NetWarden.exe "$d\"
+          New-Item -ItemType File -Force -Path "$d\portable.txt" | Out-Null
+          if (Test-Path README.md) { Copy-Item README.md "$d\" }
+          if (Test-Path LICENSE) { Copy-Item LICENSE "$d\" }
+          Compress-Archive -Path "$d\*" -DestinationPath "NetWarden-$ver-Portable.zip" -Force
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: NetWarden-build
+          path: |
+            NetWarden.exe
+            NetWarden-*.zip
+
+      - name: Publish release
+        if: startsWith(github.ref, 'refs/tags/')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            NetWarden.exe
+            NetWarden-*.zip
+          generate_release_notes: true
+          body_path: release_notes.md
