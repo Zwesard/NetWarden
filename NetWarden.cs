@@ -1,4 +1,4 @@
-// NetWarden 0.2 - сетевой сканер уязвимостей и аудит безопасности сети для Windows.
+// NetWarden 0.3 - сетевой сканер уязвимостей и аудит безопасности сети для Windows.
 // Один файл, C# 5, компилируется встроенным в Windows csc.exe. Сканируйте только свои системы или с разрешения владельца.
 using System;
 using System.Collections;
@@ -2077,7 +2077,7 @@ namespace NetWarden
                 {
                     using (WebClient wc = new WebClient())
                     {
-                        wc.Headers.Add("User-Agent", "NetWarden/0.2 (security scanner)");
+                        wc.Headers.Add("User-Agent", "NetWarden/0.3 (security scanner)");
                         wc.Headers.Add("Accept", "application/json");
                         json = wc.DownloadString(url);
                     }
@@ -3031,9 +3031,11 @@ Linux: sudo systemctl disable --now telnet.socket   (или отключите �
             foreach (MapNode hub in hubs)
             {
                 using (GraphicsPath hp = RoundRect(hub.Rect, 10f))
-                using (LinearGradientBrush hb = new LinearGradientBrush(hub.Rect, Theme.BgCardTop, Theme.BgCardBot, 90f))
-                    g.FillPath(hb, hp);
-                using (Pen hbp = new Pen(Theme.BorderCyan, 1.2f)) g.DrawPath(hbp, hp);
+                {
+                    using (LinearGradientBrush hb = new LinearGradientBrush(hub.Rect, Theme.BgCardTop, Theme.BgCardBot, 90f))
+                        g.FillPath(hb, hp);
+                    using (Pen hbp = new Pen(Theme.BorderCyan, 1.2f)) g.DrawPath(hbp, hp);
+                }
                 using (SolidBrush ac = new SolidBrush(Theme.Accent)) g.DrawString(hub.Label, FHub, ac, hub.Rect, SfCenter);
                 using (SolidBrush muted = new SolidBrush(Theme.TextMuted))
                     g.DrawString("хостов: " + hub.Count, FSmall, muted,
@@ -3447,7 +3449,7 @@ Linux: sudo systemctl disable --now telnet.socket   (или отключите �
 
         public MainForm()
         {
-            Text = "NetWarden 0.2 - аудит безопасности сети";
+            Text = "NetWarden 0.3 - аудит безопасности сети";
             ClientSize = new Size(1220, 820);
             StartPosition = FormStartPosition.CenterScreen;
             Font = new Font("Segoe UI", 9f);
