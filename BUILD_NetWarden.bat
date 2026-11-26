@@ -22,6 +22,11 @@ if errorlevel 1 (
   exit /b 1
 )
 echo.
-echo Done. NetWarden.exe is ready - starting it now.
+echo Done. NetWarden.exe is ready.
+if exist "%~dp0portable.txt" (
+  echo Portable mode: all data stays in the Data folder next to the exe.
+) else (
+  echo Normal mode: data is stored in %%APPDATA%%\NetWarden ^(delete it to reset^).
+)
 start "" "%~dp0NetWarden.exe"
 timeout /t 3 >nul

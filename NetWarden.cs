@@ -1,4 +1,4 @@
-// NetWarden 0.1 - сетевой сканер уязвимостей и аудит безопасности сети для Windows.
+// NetWarden 0.2 - сетевой сканер уязвимостей и аудит безопасности сети для Windows.
 // Один файл, C# 5, компилируется встроенным в Windows csc.exe. Сканируйте только свои системы или с разрешения владельца.
 using System;
 using System.Collections;
@@ -67,6 +67,40 @@ namespace NetWarden
         public static string Nvd(string cve)
         {
             return "https://nvd.nist.gov/vuln/detail/" + cve;
+        }
+    }
+
+    // Портативный режим: если рядом с NetWarden.exe лежит файл portable.txt, все данные программы
+    // (журнал исправлений, пользовательская база MAC, скрипты) хранятся в подпапке Data рядом с exe,
+    // а не в профиле пользователя (%APPDATA%). Это позволяет носить программу на флешке без следов
+    // на компьютере. Удалите portable.txt, чтобы вернуться к обычному хранению в %APPDATA%.
+    static class AppPaths
+    {
+        static bool? portable;
+        static string exeDir;
+
+        public static bool IsPortable
+        {
+            get
+            {
+                if (portable == null)
+                {
+                    try { exeDir = Path.GetDirectoryName(System.Reflection.Assembly.GetExecutingAssembly().Location); }
+                    catch (Exception) { exeDir = AppDomain.CurrentDomain.BaseDirectory; }
+                    portable = exeDir != null && File.Exists(Path.Combine(exeDir, "portable.txt"));
+                }
+                return portable.Value;
+            }
+        }
+
+        // Папка данных программы: Data рядом с exe в портативном режиме, иначе %APPDATA%\NetWarden.
+        public static string DataDir()
+        {
+            string d = IsPortable
+                ? Path.Combine(exeDir, "Data")
+                : Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData), "NetWarden");
+            try { Directory.CreateDirectory(d); } catch (Exception) { }
+            return d;
         }
     }
 
@@ -1402,7 +1436,7 @@ namespace NetWarden
                 // (для таких записей полное название и страна совпадают с коротким именем - своих категорий нет)
                 try
                 {
-                    string f = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData), "NetWarden", "oui.txt");
+                    string f = Path.Combine(AppPaths.DataDir(), "oui.txt");
                     if (File.Exists(f))
                         foreach (string line in File.ReadAllLines(f, Encoding.UTF8))
                         {
@@ -2043,7 +2077,7 @@ namespace NetWarden
                 {
                     using (WebClient wc = new WebClient())
                     {
-                        wc.Headers.Add("User-Agent", "NetWarden/0.1 (security scanner)");
+                        wc.Headers.Add("User-Agent", "NetWarden/0.2 (security scanner)");
                         wc.Headers.Add("Accept", "application/json");
                         json = wc.DownloadString(url);
                     }
@@ -2181,7 +2215,7 @@ namespace NetWarden
     {
         static string Dir()
         {
-            string d = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData), "NetWarden", "scans");
+            string d = Path.Combine(AppPaths.DataDir(), "scans");
             Directory.CreateDirectory(d);
             return d;
         }
@@ -2427,8 +2461,7 @@ namespace NetWarden
         // Запуск исправления с правами администратора (запрос UAC). Возвращает текст результата.
         public static string Run(FixAction a, Finding f, HostInfo h)
         {
-            string dir = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData), "NetWarden");
-            Directory.CreateDirectory(dir);
+            string dir = AppPaths.DataDir();
             string log = Path.Combine(dir, "fix-result.txt");
             string ps1 = Path.Combine(dir, "fix-run.ps1");
             if (File.Exists(log)) File.Delete(log);
@@ -3414,7 +3447,7 @@ Linux: sudo systemctl disable --now telnet.socket   (или отключите �
 
         public MainForm()
         {
-            Text = "NetWarden 0.1 - аудит безопасности сети";
+            Text = "NetWarden 0.2 - аудит безопасности сети";
             ClientSize = new Size(1220, 820);
             StartPosition = FormStartPosition.CenterScreen;
             Font = new Font("Segoe UI", 9f);
@@ -3438,7 +3471,9 @@ Linux: sudo systemctl disable --now telnet.socket   (или отключите �
             heroCard = Glass(Theme.BgCardTop, Theme.BgCardBot, Theme.BorderCyan, true);
             Label brand = new Label(); brand.Text = "N E T W A R D E N"; brand.Font = new Font("Segoe UI", 15f, FontStyle.Bold);
             brand.ForeColor = Theme.Accent; brand.AutoSize = true; brand.Location = new Point(22, 14); brand.BackColor = Color.Transparent;
-            Label brandSub = new Label(); brandSub.Text = "ЦЕНТР АУДИТА БЕЗОПАСНОСТИ СЕТИ"; brandSub.Font = new Font("Segoe UI", 8f);
+            Label brandSub = new Label();
+            brandSub.Text = "ЦЕНТР АУДИТА БЕЗОПАСНОСТИ СЕТИ" + (AppPaths.IsPortable ? "   ·   ПОРТАТИВНЫЙ РЕЖИМ" : "");
+            brandSub.Font = new Font("Segoe UI", 8f);
             brandSub.ForeColor = Theme.TextMuted; brandSub.AutoSize = true; brandSub.Location = new Point(24, 44); brandSub.BackColor = Color.Transparent;
             heroStatus = new Label(); heroStatus.Text = "СТАТУС: ГОТОВ К СКАНИРОВАНИЮ"; heroStatus.Font = new Font("Segoe UI", 13f, FontStyle.Bold);
             heroStatus.ForeColor = Theme.TextMain; heroStatus.AutoSize = true; heroStatus.Location = new Point(22, 70); heroStatus.BackColor = Color.Transparent;
