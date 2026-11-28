@@ -1,4 +1,4 @@
-// NetWarden 0.3 - сетевой сканер уязвимостей и аудит безопасности сети для Windows.
+// NetWarden 0.4 - сетевой сканер уязвимостей и аудит безопасности сети для Windows.
 // Один файл, C# 5, компилируется встроенным в Windows csc.exe. Сканируйте только свои системы или с разрешения владельца.
 using System;
 using System.Collections;
@@ -173,11 +173,11 @@ namespace NetWarden
             if (r.Width <= 0 || r.Height <= 0) return;
             using (GraphicsPath path = RoundRect(r, 10f))
             {
+                // Мягкое единое свечение вплотную к самой окантовке (а не отдельные вынесенные кольца -
+                // именно они на маленькой панели выглядели как "уголки" по краям).
                 if (glow)
-                    for (int i = 3; i >= 1; i--)
-                        using (Pen gp = new Pen(Color.FromArgb(18 * i, Accent), 1f + i))
-                        using (GraphicsPath big = RoundRect(Inflate(r, i * 1.4f), 10f + i))
-                            g.DrawPath(gp, big);
+                    using (Pen gp = new Pen(Color.FromArgb(70, Accent), 2.2f))
+                        g.DrawPath(gp, path);
                 using (LinearGradientBrush grad = new LinearGradientBrush(new PointF(0, r.Y), new PointF(0, r.Bottom), top, bot))
                     g.FillPath(grad, path);
                 using (Pen pen = new Pen(border, 1.1f)) g.DrawPath(pen, path);
@@ -1452,10 +1452,79 @@ namespace NetWarden
             }
         }
 
+        // WebClient не умеет сам ограничивать таймаут запроса - без этого один зависший онлайн-запрос
+        // мог бы надолго задержать всё сканирование.
+        class TimedWebClient : WebClient
+        {
+            public int Timeout = 1500;
+            protected override WebRequest GetWebRequest(Uri address)
+            {
+                WebRequest r = base.GetWebRequest(address);
+                r.Timeout = Timeout;
+                return r;
+            }
+        }
+
+        static readonly object OnlineSync = new object();
+        static readonly Dictionary<string, string> OnlineCache = new Dictionary<string, string>();
+
+        // Онлайн-поиск производителя по MAC в нескольких открытых базах, когда префикса нет во встроенном
+        // локальном списке. Результат кэшируется на время работы программы, чтобы не ходить в сеть повторно
+        // за тем же префиксом. Используется только для реальных (не случайных) MAC-адресов.
+        static string OnlineLookup(string mac)
+        {
+            string prefix = mac.Substring(0, 8).Replace(":", "").ToUpper();
+            lock (OnlineSync) { string cached; if (OnlineCache.TryGetValue(prefix, out cached)) return cached; }
+            string result = "";
+
+            // База 1: api.macvendors.com - при успехе отвечает простым текстом с названием производителя.
+            try
+            {
+                using (TimedWebClient wc = new TimedWebClient())
+                {
+                    wc.Timeout = 1500;
+                    wc.Headers.Add("User-Agent", "NetWarden (security scanner)");
+                    string body = wc.DownloadString("https://api.macvendors.com/" + Uri.EscapeDataString(mac)).Trim();
+                    if (body != "" && body.Length < 200 && !body.StartsWith("{") && !body.StartsWith("<"))
+                        result = body;
+                }
+            }
+            catch (Exception) { }
+
+            // База 2: api.maclookup.app - JSON с полем company, если в первой базе ничего не нашлось.
+            if (result == "")
+            {
+                try
+                {
+                    string json;
+                    using (TimedWebClient wc = new TimedWebClient())
+                    {
+                        wc.Timeout = 1500;
+                        wc.Headers.Add("User-Agent", "NetWarden (security scanner)");
+                        wc.Headers.Add("Accept", "application/json");
+                        json = wc.DownloadString("https://api.maclookup.app/v2/macs/" + Uri.EscapeDataString(mac));
+                    }
+                    JavaScriptSerializer js = new JavaScriptSerializer();
+                    Dictionary<string, object> d = js.DeserializeObject(json) as Dictionary<string, object>;
+                    object found, company;
+                    if (d != null && d.TryGetValue("found", out found) && Convert.ToBoolean(found) &&
+                        d.TryGetValue("company", out company) && company != null && Convert.ToString(company) != "")
+                        result = Convert.ToString(company);
+                }
+                catch (Exception) { }
+            }
+
+            lock (OnlineSync) { OnlineCache[prefix] = result; }
+            return result;
+        }
+
         public static string Lookup(string mac)
         {
             OuiInfo i = Find(mac);
-            return i != null ? i.Vendor : (IsRandom(mac) ? "случайный MAC" : "");
+            if (i != null) return i.Vendor;
+            if (IsRandom(mac)) return "случайный MAC";
+            string online = OnlineLookup(mac);
+            return online != "" ? online : "";
         }
 
         static OuiInfo Find(string mac)
@@ -1478,13 +1547,18 @@ namespace NetWarden
         {
             if (string.IsNullOrEmpty(mac)) return "";
             OuiInfo i = Find(mac);
-            if (i == null)
-                return IsRandom(mac)
-                    ? "MAC-адрес случайный (локально назначенный) - так современные телефоны и ноутбуки скрывают " +
-                      "настоящего производителя сетевого чипа ради приватности; определить по нему реальную модель устройства нельзя."
-                    : "Производитель по базе MAC-адресов не определён (префикс отсутствует во встроенной базе).";
-            string who = i.Full + (i.Country != "" ? " (" + i.Country + ")" : "");
-            return i.Category != "" ? who + " - " + i.Category : who;
+            if (i != null)
+            {
+                string who = i.Full + (i.Country != "" ? " (" + i.Country + ")" : "");
+                return i.Category != "" ? who + " - " + i.Category : who;
+            }
+            if (IsRandom(mac))
+                return "MAC-адрес случайный (локально назначенный) - так современные телефоны и ноутбуки скрывают " +
+                       "настоящего производителя сетевого чипа ради приватности; определить по нему реальную модель устройства нельзя.";
+            string online = OnlineLookup(mac);
+            if (online != "")
+                return online + " (найдено в открытой онлайн-базе MAC-адресов, не во встроенном локальном списке)";
+            return "Производитель по базе MAC-адресов не определён (префикс отсутствует ни во встроенной базе, ни в доступных онлайн-базах - возможно, нет интернета).";
         }
     }
 
@@ -2077,7 +2151,7 @@ namespace NetWarden
                 {
                     using (WebClient wc = new WebClient())
                     {
-                        wc.Headers.Add("User-Agent", "NetWarden/0.3 (security scanner)");
+                        wc.Headers.Add("User-Agent", "NetWarden/0.4 (security scanner)");
                         wc.Headers.Add("Accept", "application/json");
                         json = wc.DownloadString(url);
                     }
@@ -3045,7 +3119,7 @@ Linux: sudo systemctl disable --now telnet.socket   (или отключите �
         }
 
         // Простая векторная иконка устройства по его типу (GW/WIN/NIX/DB/WEB/NET/HOST), без внешних файлов.
-        static void DrawIcon(Graphics g, string kind, RectangleF r, Color c)
+        public static void DrawIcon(Graphics g, string kind, RectangleF r, Color c)
         {
             float cx = r.X + r.Width / 2f, cy = r.Y + r.Height / 2f;
             Pen pen = new Pen(c, 2f);
@@ -3258,7 +3332,7 @@ Linux: sudo systemctl disable --now telnet.socket   (или отключите �
             FlatAppearance.BorderSize = 0;
             ForeColor = Theme.TextMain;
             Cursor = Cursors.Hand;
-            Font = new Font("Segoe UI", 9.5f, FontStyle.Bold);
+            Font = new Font("Segoe UI", 9.5f, FontStyle.Regular);
         }
 
         protected override void OnMouseEnter(EventArgs e) { hover = true; Invalidate(); base.OnMouseEnter(e); }
@@ -3267,7 +3341,13 @@ Linux: sudo systemctl disable --now telnet.socket   (или отключите �
         protected override void OnMouseUp(MouseEventArgs e) { pressed = false; Invalidate(); base.OnMouseUp(e); }
         protected override void OnEnabledChanged(EventArgs e) { Invalidate(); base.OnEnabledChanged(e); }
 
-        static RectangleF InflateF(Rectangle r, float d) { RectangleF x = r; x.Inflate(d, d); return x; }
+        // Без этого под скруглённой формой проступают квадратные углы системной заливки фона -
+        // именно это выглядело как "неровная кнопка без полукруглых окончаний".
+        protected override void OnPaintBackground(PaintEventArgs e)
+        {
+            Color bg = Parent != null ? Parent.BackColor : Theme.BgDeep;
+            using (SolidBrush b = new SolidBrush(bg)) e.Graphics.FillRectangle(b, ClientRectangle);
+        }
 
         protected override void OnPaint(PaintEventArgs e)
         {
@@ -3282,11 +3362,10 @@ Linux: sudo systemctl disable --now telnet.socket   (или отключите �
                     : Primary ? (pressed ? Color.FromArgb(40, 170, 160) : hover ? Color.FromArgb(58, 214, 200) : Color.FromArgb(46, 196, 182))
                               : (pressed ? Color.FromArgb(34, 44, 62) : hover ? Color.FromArgb(40, 52, 74) : Color.FromArgb(28, 37, 54));
                 Color fillBot = !Enabled ? Color.FromArgb(28, 34, 46) : Primary ? Color.FromArgb(24, 120, 112) : Color.FromArgb(16, 22, 34);
+                // Единое мягкое свечение вплотную к контуру кнопки (без вынесенных колец - на маленькой кнопке
+                // они выглядели как отдельные "уголки" по краям).
                 if (Primary && Enabled && (hover || pressed))
-                    for (int i = 2; i >= 1; i--)
-                        using (Pen gp = new Pen(Color.FromArgb(55 * i, Theme.Accent), 1f + i))
-                        using (GraphicsPath big = Theme.RoundRect(InflateF(b, i * 1.3f), 7f + i))
-                            g.DrawPath(gp, big);
+                    using (Pen gp = new Pen(Color.FromArgb(90, Theme.Accent), 2.4f)) g.DrawPath(gp, path);
                 using (LinearGradientBrush grad = new LinearGradientBrush(new PointF(0, b.Y), new PointF(0, b.Bottom), fillTop, fillBot))
                     g.FillPath(grad, path);
                 using (Pen pen = new Pen(Enabled ? borderC : Theme.TextDim, 1.2f)) g.DrawPath(pen, path);
@@ -3335,7 +3414,8 @@ Linux: sudo systemctl disable --now telnet.socket   (или отключите �
 
     class MainForm : Form
     {
-        TextBox tbTargets, details;
+        TextBox tbTargets;
+        RichTextBox details;
         ComboBox cbProfile;
         CheckBox chkSkip;
         Button btnStart, btnStop, btnExport;
@@ -3348,7 +3428,8 @@ Linux: sudo systemctl disable --now telnet.socket   (или отключите �
         System.Windows.Forms.Timer timer;
         Scanner scanner;
         ScanResult current;
-        TextBox vulnDetails, mapDetails;
+        TextBox vulnDetails;
+        RichTextBox mapDetails;
         SplitContainer vsplit, mapSplit;
         NetMapPanel netMap;
         ListView devLv, portLv;
@@ -3382,6 +3463,8 @@ Linux: sudo systemctl disable --now telnet.socket   (или отключите �
         static Panel Glass(Color top, Color bot, Color border, bool glow)
         {
             Panel p = new Panel();
+            p.Dock = DockStyle.Fill; // критично: без этого панель остаётся в размере "по умолчанию" (~200x100),
+                                     // и все элементы правее/ниже этой границы физически невидимы
             p.BackColor = Theme.BgDeep;
             p.Paint += delegate (object s, PaintEventArgs e) { Theme.PaintGlass(e.Graphics, ((Panel)s).ClientRectangle, top, bot, border, glow); };
             return p;
@@ -3435,9 +3518,42 @@ Linux: sudo systemctl disable --now telnet.socket   (или отключите �
             using (SolidBrush bg = new SolidBrush(rowBg)) e.Graphics.FillRectangle(bg, e.Bounds);
             if (sel) using (Pen pen = new Pen(Theme.Accent)) e.Graphics.DrawLine(pen, e.Bounds.X, e.Bounds.Y, e.Bounds.X, e.Bounds.Bottom);
             Color fg = e.Item.ForeColor;
-            if (e.ColumnIndex == 0 && fg.ToArgb() != Theme.TextMain.ToArgb())
-                using (SolidBrush ac = new SolidBrush(fg)) e.Graphics.FillRectangle(ac, e.Bounds.X, e.Bounds.Y, 3, e.Bounds.Height);
-            TextRenderer.DrawText(e.Graphics, e.SubItem.Text, e.Item.Font, e.Bounds, fg, TextFormatFlags.VerticalCenter | TextFormatFlags.Left | TextFormatFlags.LeftAndRightPadding | TextFormatFlags.EndEllipsis);
+            Rectangle textBounds = e.Bounds;
+            if (e.ColumnIndex == 0)
+            {
+                if (fg.ToArgb() != Theme.TextMain.ToArgb())
+                    using (SolidBrush ac = new SolidBrush(fg)) e.Graphics.FillRectangle(ac, e.Bounds.X, e.Bounds.Y, 3, e.Bounds.Height);
+                // Маленькая иконка типа устройства перед IP-адресом (только там, где у ListView задан SmallImageList).
+                ListView lvOwner = (ListView)sender;
+                if (lvOwner.SmallImageList != null && e.Item.ImageKey != "" && lvOwner.SmallImageList.Images.ContainsKey(e.Item.ImageKey))
+                {
+                    int iy = e.Bounds.Y + (e.Bounds.Height - 16) / 2;
+                    e.Graphics.DrawImage(lvOwner.SmallImageList.Images[e.Item.ImageKey], e.Bounds.X + 5, iy, 16, 16);
+                    textBounds = new Rectangle(e.Bounds.X + 24, e.Bounds.Y, e.Bounds.Width - 24, e.Bounds.Height);
+                }
+            }
+            TextRenderer.DrawText(e.Graphics, e.SubItem.Text, e.Item.Font, textBounds, fg, TextFormatFlags.VerticalCenter | TextFormatFlags.Left | TextFormatFlags.LeftAndRightPadding | TextFormatFlags.EndEllipsis);
+        }
+
+        // Небольшие значки типа устройства (роутер, ПК, сервер БД и т.п.) переиспользуют ту же
+        // отрисовку, что и карта сети - просто в маленьком размере и с прозрачным фоном.
+        static ImageList BuildDeviceIcons()
+        {
+            ImageList il = new ImageList();
+            il.ColorDepth = ColorDepth.Depth32Bit;
+            il.ImageSize = new Size(16, 16);
+            foreach (string kind in new[] { "GW", "WIN", "NIX", "DB", "WEB", "NET", "HOST" })
+            {
+                Bitmap bmp = new Bitmap(16, 16, System.Drawing.Imaging.PixelFormat.Format32bppArgb);
+                using (Graphics g = Graphics.FromImage(bmp))
+                {
+                    g.SmoothingMode = SmoothingMode.AntiAlias;
+                    g.Clear(Color.Transparent);
+                    NetMapPanel.DrawIcon(g, kind, new RectangleF(-6f, -6f, 28f, 28f), Theme.Electric);
+                }
+                il.Images.Add(kind, bmp);
+            }
+            return il;
         }
 
         void StyleListView(ListView l)
@@ -3449,7 +3565,7 @@ Linux: sudo systemctl disable --now telnet.socket   (или отключите �
 
         public MainForm()
         {
-            Text = "NetWarden 0.3 - аудит безопасности сети";
+            Text = "NetWarden 0.4 - аудит безопасности сети";
             ClientSize = new Size(1220, 820);
             StartPosition = FormStartPosition.CenterScreen;
             Font = new Font("Segoe UI", 9f);
@@ -3477,7 +3593,7 @@ Linux: sudo systemctl disable --now telnet.socket   (или отключите �
             brandSub.Text = "ЦЕНТР АУДИТА БЕЗОПАСНОСТИ СЕТИ" + (AppPaths.IsPortable ? "   ·   ПОРТАТИВНЫЙ РЕЖИМ" : "");
             brandSub.Font = new Font("Segoe UI", 8f);
             brandSub.ForeColor = Theme.TextMuted; brandSub.AutoSize = true; brandSub.Location = new Point(24, 44); brandSub.BackColor = Color.Transparent;
-            heroStatus = new Label(); heroStatus.Text = "СТАТУС: ГОТОВ К СКАНИРОВАНИЮ"; heroStatus.Font = new Font("Segoe UI", 13f, FontStyle.Bold);
+            heroStatus = new Label(); heroStatus.Text = "СТАТУС: ГОТОВ К СКАНИРОВАНИЮ"; heroStatus.Font = new Font("Segoe UI", 13f, FontStyle.Regular);
             heroStatus.ForeColor = Theme.TextMain; heroStatus.AutoSize = true; heroStatus.Location = new Point(22, 70); heroStatus.BackColor = Color.Transparent;
             heroMeta = new Label(); heroMeta.Text = "Сканируйте только системы, на которые есть разрешение.";
             heroMeta.ForeColor = Theme.TextMuted; heroMeta.AutoSize = false; heroMeta.Location = new Point(24, 102);
@@ -3523,12 +3639,17 @@ Linux: sudo systemctl disable --now telnet.socket   (или отключите �
             btnUpdateDb.Size = new Size(180, 27); btnUpdateDb.Click += OnUpdateDb;
             paramsCard.Controls.AddRange(new Control[] { l1, tbTargets, btnMyNet, cbProfile, tbCustomPorts, chkUdp, chkSkip, chkBrute, btnUpdateDb });
 
+            ImageList deviceIcons = BuildDeviceIcons();
+
             // ---- вкладка "Результаты" ----
             split = new SplitContainer(); split.Dock = DockStyle.Fill; split.BackColor = Theme.BorderDim;
             tree = new TreeView(); tree.Dock = DockStyle.Fill; tree.HideSelection = false; tree.AfterSelect += OnTreeSelect;
+            tree.ImageList = deviceIcons;
             tree.BackColor = Color.FromArgb(15, 20, 32); tree.ForeColor = Theme.TextMain; tree.BorderStyle = BorderStyle.None; tree.ItemHeight = 22;
-            details = new TextBox(); details.Dock = DockStyle.Fill; details.Multiline = true; details.ReadOnly = true;
-            details.ScrollBars = ScrollBars.Vertical; details.BorderStyle = BorderStyle.None; DarkField(details);
+            details = new RichTextBox(); details.Dock = DockStyle.Fill; details.ReadOnly = true;
+            details.ScrollBars = RichTextBoxScrollBars.Vertical; details.BorderStyle = BorderStyle.None; DarkField(details);
+            details.BackColor = Color.FromArgb(24, 32, 48); // чуть светлее обычного тёмного поля, по просьбе
+            details.Font = new Font("Segoe UI", 9f);
             split.Panel1.Controls.Add(tree); split.Panel2.Controls.Add(details);
             split.Panel1.BackColor = Color.FromArgb(15, 20, 32); split.Panel2.BackColor = Color.FromArgb(18, 24, 36);
             btnFixRes = MakeFixPanel(split.Panel2);
@@ -3551,8 +3672,10 @@ Linux: sudo systemctl disable --now telnet.socket   (или отключите �
             // ---- вкладка "Карта сети" ----
             netMap = new NetMapPanel(); netMap.Dock = DockStyle.Fill; netMap.BackColor = Color.FromArgb(10, 14, 23);
             netMap.HostSelected += OnMapSelect; netMap.HostActivated += OnMapActivate;
-            mapDetails = new TextBox(); mapDetails.Dock = DockStyle.Fill; mapDetails.Multiline = true; mapDetails.ReadOnly = true;
-            mapDetails.ScrollBars = ScrollBars.Vertical; mapDetails.BorderStyle = BorderStyle.None; DarkField(mapDetails);
+            mapDetails = new RichTextBox(); mapDetails.Dock = DockStyle.Fill; mapDetails.ReadOnly = true;
+            mapDetails.ScrollBars = RichTextBoxScrollBars.Vertical; mapDetails.BorderStyle = BorderStyle.None; DarkField(mapDetails);
+            mapDetails.BackColor = Color.FromArgb(24, 32, 48);
+            mapDetails.Font = new Font("Segoe UI", 9f);
             mapSplit = new SplitContainer(); mapSplit.Dock = DockStyle.Fill; mapSplit.BackColor = Theme.BorderDim;
             mapSplit.Panel1.Controls.Add(netMap); mapSplit.Panel2.Controls.Add(mapDetails);
             mapSplit.Panel2.BackColor = Color.FromArgb(18, 24, 36);
@@ -3563,6 +3686,7 @@ Linux: sudo systemctl disable --now telnet.socket   (или отключите �
 
             // ---- вкладка "Устройства" ----
             devLv = new ListView(); devLv.Dock = DockStyle.Fill; devLv.View = View.Details; devLv.FullRowSelect = true; StyleListView(devLv);
+            devLv.SmallImageList = deviceIcons;
             devLv.ShowItemToolTips = true;
             devLv.Columns.Add("IP-адрес", 110); devLv.Columns.Add("Имя", 150); devLv.Columns.Add("MAC", 125);
             devLv.Columns.Add("Производитель", 150); devLv.Columns.Add("Операционная система", 230); devLv.Columns.Add("Тип", 170);
@@ -3578,7 +3702,7 @@ Linux: sudo systemctl disable --now telnet.socket   (или отключите �
 
             tabs = new TabControl(); tabs.Dock = DockStyle.Fill; tabs.DrawMode = TabDrawMode.OwnerDrawFixed;
             tabs.ItemSize = new Size(180, 34); tabs.SizeMode = TabSizeMode.Fixed; tabs.Padding = new Point(0, 0);
-            tabs.Font = new Font("Segoe UI", 8.5f, FontStyle.Bold); tabs.DrawItem += OnTabDraw;
+            tabs.Font = new Font("Segoe UI", 8.5f, FontStyle.Regular); tabs.DrawItem += OnTabDraw;
             tabs.TabPages.Add(t1); tabs.TabPages.Add(tDev); tabs.TabPages.Add(t5); tabs.TabPages.Add(t2); tabs.TabPages.Add(tPorts);
 
             // ======================= НИЖНЯЯ ПАНЕЛЬ: прогресс / статус / экспорт =======================
@@ -3677,8 +3801,10 @@ Linux: sudo systemctl disable --now telnet.socket   (или отключите �
             }
             if (!sc.Done)
             {
-                status.Text = sc.Stage + ": " + done + " / " + tot;
-                heroMeta.Text = sc.Stage + "   ·   " + done + " / " + tot + "   ·   найдено хостов: " + mapHosts.Count +
+                int pct = tot > 0 ? (int)(done * 100 / tot) : 0;
+                status.Text = sc.Stage + ": " + done + " / " + tot + " (" + pct + "%)   ·   найдено хостов: " + mapHosts.Count +
+                              "   ·   время: " + Elapsed(scanStarted);
+                heroMeta.Text = sc.Stage + "   ·   " + pct + "%   ·   найдено хостов: " + mapHosts.Count +
                                 "   ·   время: " + Elapsed(scanStarted);
             }
             if (sc.Done && sc.Log.IsEmpty && sc.Finished.IsEmpty) FinishScan(sc);
@@ -3728,6 +3854,8 @@ Linux: sudo systemctl disable --now telnet.socket   (или отключите �
             AddPortRows(h);
             TreeNode root = new TreeNode(h.Ip + "  " + h.Name + (h.Os != "" ? "  - " + h.Os : "") + "   [находок: " + h.Findings.Count + "]");
             root.Tag = h;
+            string devKind = NetMapPanel.DevType(h, netMap.Gateway)[0];
+            root.ImageKey = devKind; root.SelectedImageKey = devKind;
             int rootWorst = WorstActionableIdx(h.Findings);
             if (rootWorst <= 3) root.ForeColor = Sev.Col(Sev.Order[rootWorst]);
             foreach (PortInfo p in h.Ports)
@@ -3803,7 +3931,7 @@ Linux: sudo systemctl disable --now telnet.socket   (или отключите �
             else if (tag is HostInfo)
             {
                 HostInfo h = (HostInfo)tag;
-                details.Text = HostText(h);
+                RenderHostDetails(details, h);
             }
         }
 
@@ -3813,6 +3941,50 @@ Linux: sudo systemctl disable --now telnet.socket   (или отключите �
             KeyValuePair<HostInfo, Finding> kv = (KeyValuePair<HostInfo, Finding>)lv.SelectedItems[0].Tag;
             vulnDetails.Text = FindingText(kv.Value, kv.Key.Ip);
             curFinding = kv.Value; curHost = kv.Key; UpdateFixButtons();
+        }
+
+        static void RtbAppend(RichTextBox rtb, string text, Color color)
+        {
+            int start = rtb.TextLength;
+            rtb.AppendText(text);
+            rtb.Select(start, text.Length);
+            rtb.SelectionColor = color;
+            rtb.SelectionLength = 0;
+        }
+
+        // IP-адрес - ярко-белым (основной заголовок карточки), описание устройства (тип/ОС/MAC) - красным,
+        // чтобы сразу бросалось в глаза; списки портов и находок - обычным цветом текста (находки - по
+        // своей серьёзности, как и раньше).
+        void RenderHostDetails(RichTextBox rtb, HostInfo h)
+        {
+            rtb.Clear();
+            string nl = "\r\n";
+            string[] dt = NetMapPanel.DevType(h, netMap.Gateway);
+            Color white = Color.White;
+            Color red = Theme.Danger;
+
+            RtbAppend(rtb, h.Ip + (h.Name != "" ? "  (" + h.Name + ")" : "") + nl, white);
+            RtbAppend(rtb, dt[1] + nl, red);
+            RtbAppend(rtb, "ОС: " + (h.Os != "" ? h.Os : "не определена") + (h.OsBasis != "" ? "  [" + h.OsBasis + "]" : "") + nl, red);
+            if (h.Mac != "")
+            {
+                RtbAppend(rtb, "MAC: " + h.Mac + (h.Vendor != "" ? "  (" + h.Vendor + ")" : "") + nl, red);
+                if (h.MacInfo != "") RtbAppend(rtb, "Чьё устройство: " + h.MacInfo + nl, red);
+            }
+            RtbAppend(rtb, nl, Theme.TextMain);
+            RtbAppend(rtb, "Открытые порты: " + h.Ports.Count + nl, Theme.TextMain);
+            foreach (PortInfo p in h.Ports)
+                RtbAppend(rtb, "  " + p.Port + "/" + p.Proto + "  " + p.Service + (p.Tls ? " (TLS)" : "") + "  " + (p.Product + " " + p.Version).Trim() + nl, Theme.TextMain);
+            RtbAppend(rtb, nl + "Находки: " + h.Findings.Count + nl, Theme.TextMain);
+            List<Finding> fl = new List<Finding>(h.Findings);
+            fl.Sort(delegate (Finding x, Finding y) { return Sev.Idx(x.Severity).CompareTo(Sev.Idx(y.Severity)); });
+            foreach (Finding f in fl)
+            {
+                Color fc = Sev.Col(f.Severity);
+                RtbAppend(rtb, nl + "[" + Sev.Ru(f.Severity) + "] порт " + f.Port + ": " + f.Title + nl, fc);
+                RtbAppend(rtb, "   Как исправить: " + (f.Rec != "" ? f.Rec : "ограничьте доступ к сервису") + nl, Theme.TextMain);
+            }
+            rtb.Select(0, 0);
         }
 
         string HostText(HostInfo h)
@@ -3997,6 +4169,7 @@ Linux: sudo systemctl disable --now telnet.socket   (или отключите �
             ListViewItem it = new ListViewItem(new string[] {
                 h.Ip, h.Name, h.Mac, h.Vendor, h.Os + (h.OsBasis != "" ? " (" + h.OsBasis + ")" : ""), dt[1],
                 h.Ports.Count.ToString(), string.Join(", ", svcs.ToArray()), h.Findings.Count.ToString() });
+            it.ImageKey = dt[0];
             int best = WorstActionableIdx(h.Findings);
             it.ForeColor = best <= 3 ? Sev.Col(Sev.Order[best]) : Theme.TextMain;
             it.Tag = h;
@@ -4017,7 +4190,7 @@ Linux: sudo systemctl disable --now telnet.socket   (или отключите �
             }
         }
 
-        void OnMapSelect(HostInfo h) { mapDetails.Text = HostText(h); }
+        void OnMapSelect(HostInfo h) { RenderHostDetails(mapDetails, h); }
 
         void OnMapActivate(HostInfo h)
         {
