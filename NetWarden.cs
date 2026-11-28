@@ -1,4 +1,4 @@
-// NetWarden 0.4 - сетевой сканер уязвимостей и аудит безопасности сети для Windows.
+// NetWarden 0.5 - сетевой сканер уязвимостей и аудит безопасности сети для Windows.
 // Один файл, C# 5, компилируется встроенным в Windows csc.exe. Сканируйте только свои системы или с разрешения владельца.
 using System;
 using System.Collections;
@@ -2151,7 +2151,7 @@ namespace NetWarden
                 {
                     using (WebClient wc = new WebClient())
                     {
-                        wc.Headers.Add("User-Agent", "NetWarden/0.4 (security scanner)");
+                        wc.Headers.Add("User-Agent", "NetWarden/0.5 (security scanner)");
                         wc.Headers.Add("Accept", "application/json");
                         json = wc.DownloadString(url);
                     }
@@ -3565,7 +3565,7 @@ Linux: sudo systemctl disable --now telnet.socket   (или отключите �
 
         public MainForm()
         {
-            Text = "NetWarden 0.4 - аудит безопасности сети";
+            Text = "NetWarden 0.5 - аудит безопасности сети";
             ClientSize = new Size(1220, 820);
             StartPosition = FormStartPosition.CenterScreen;
             Font = new Font("Segoe UI", 9f);
@@ -3731,6 +3731,29 @@ Linux: sudo systemctl disable --now telnet.socket   (или отключите �
                 split.SplitterDistance = Math.Max(100, split.Width * 6 / 10);
                 mapSplit.SplitterDistance = Math.Max(100, mapSplit.Width * 7 / 10);
                 vsplit.SplitterDistance = Math.Max(60, vsplit.Height * 6 / 10);
+
+                // К этому моменту heroCard/paramsCard/bottomCard уже получили свой настоящий размер от
+                // TableLayoutPanel (Dock=Fill). Пересчитываем позиции всех элементов, привязанных к правому
+                // краю (Anchor=Right): при добавлении в конструкторе эти панели ещё имели временный размер
+                // "по умолчанию" (~200px), и Anchor запомнил неверное расстояние до правого края - поэтому
+                // кнопки "Моя сеть", "Старт", "Стоп", "Экспорт отчёта" и выбор профиля портов пропадали
+                // далеко за пределами окна. Установка .Location/.Width здесь заново фиксирует правильную
+                // точку отсчёта для Anchor - дальнейшее изменение размера окна пользователем будет работать
+                // уже корректно.
+                int hw = heroCard.ClientSize.Width;
+                btnStop.Location = new Point(hw - 20 - btnStop.Width, 76);
+                btnStart.Location = new Point(btnStop.Left - 12 - btnStart.Width, 76);
+                heroMeta.Width = Math.Max(200, btnStart.Left - 20 - heroMeta.Left);
+
+                int pw = paramsCard.ClientSize.Width;
+                btnMyNet.Location = new Point(pw - 20 - btnMyNet.Width, 6);
+                cbProfile.Location = new Point(btnMyNet.Left - 10 - cbProfile.Width, 9);
+                tbCustomPorts.Location = new Point(cbProfile.Left - 8 - tbCustomPorts.Width, 9);
+                tbTargets.Width = Math.Max(150, tbCustomPorts.Left - 10 - tbTargets.Left);
+
+                int bw = bottomCard.ClientSize.Width;
+                btnExport.Location = new Point(bw - 20 - btnExport.Width, 8);
+                status.Width = Math.Max(150, btnExport.Left - 10 - status.Left);
             };
             FormClosing += delegate { if (scanner != null) scanner.Cancel = true; };
         }
